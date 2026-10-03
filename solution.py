@@ -1,8 +1,24 @@
 """Student entry point. See README.md for the API and scoring rules."""
 
 import time
+import heapq
 from collections import deque
 from sokoban import SokobanState, sokoban_goal_state
+
+def heuristic(state):
+    total = 0  # tổng h(n) của cả state
+
+    for box in state.boxes:  # duyệt từng thùng
+        min_distance = float("inf")  # khoảng cách nhỏ nhất từ box này tới 1 storage
+
+        for storage in state.storage:  # thử tất cả ô đích
+            distance = abs(box[0] - storage[0]) + abs(box[1] - storage[1]) # tính khoảng cách Manhattan giữa box và storage
+
+            min_distance = min(min_distance, distance) # giữ lại storage gần box này nhất
+
+        total += min_distance # cộng khoảng cách gần nhất của box này vào tổng h(n)
+
+    return total  # trả về heuristic h(n)
 
 def solve(initial_state, timebound=120):
     if timebound <= 0:
