@@ -38,6 +38,53 @@ def gen_successors(nb, robots, boxes): #sinh ra tất cả các trạng thái (r
             out.append((new_robots, nbx, (r, d)))
     return out
 
+def heuristic_mask(boxes, storage_mask, w):  #thêm heuristic_mask để phù hợp với code search hiện tại
+    total = 0  # tổng h(n)
+
+    # lấy danh sách vị trí các storage từ storage_mask
+    storages = []
+
+    temp_storage = storage_mask
+
+    while temp_storage:
+        bit = temp_storage & -temp_storage
+        pos = bit.bit_length() - 1
+
+        storages.append(pos)
+
+        temp_storage ^= bit
+
+    # duyệt từng box
+    temp_boxes = boxes
+
+    while temp_boxes:
+        bit = temp_boxes & -temp_boxes
+        box_pos = bit.bit_length() - 1
+
+        # đổi vị trí box sang tọa độ (x, y)
+        box_x = box_pos % w
+        box_y = box_pos // w
+
+        min_distance = float("inf")
+
+        # tìm storage gần box này nhất
+        for storage_pos in storages:
+
+            storage_x = storage_pos % w
+            storage_y = storage_pos // w
+
+            distance = abs(box_x - storage_x) + abs(box_y - storage_y)
+            # khoảng cách Manhattan
+
+            min_distance = min(min_distance, distance)
+
+        total += min_distance
+        # cộng khoảng cách gần nhất của box này vào h(n)
+
+        temp_boxes ^= bit
+        # bỏ box vừa xét để chuyển sang box tiếp theo
+
+    return total
 
 def bfs_core(nb, robots0, boxes0, storage_mask, deadline):
     """Trả về (goal_key, came_from) nếu tìm thấy, hoặc (None, came_from) nếu hết giờ/không có lời giải."""
