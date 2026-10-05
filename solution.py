@@ -2,8 +2,7 @@
 
 import time
 import heapq
-from collections import deque
-from sokoban import SokobanState, sokoban_goal_state
+DELTAS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
 
 def build_neighbors(state): #ính sẵn, cho mỗi ô trên bàn cờ, 4 ô liền kề (lên/phải/xuống/trái) nếu đi được hoặc -1 nếu bị chặn (tường/ra ngoài biên), để lúc search không phải tính lại tọa độ hay tra frozenset mỗi lần.
     w = state.width
@@ -43,7 +42,8 @@ def gen_successors(nb, robots, boxes): #sinh ra tất cả các trạng thái (r
 def bfs_core(nb, robots0, boxes0, storage_mask, deadline):
     """Trả về (goal_key, came_from) nếu tìm thấy, hoặc (None, came_from) nếu hết giờ/không có lời giải."""
     start = (robots0, boxes0)
-    frontier = deque([start])
+    counter = 0
+    frontier =[(0,counter, start)]
     came_from = {start: None}      # key -> (parent_key, action) hoặc None cho state đầu
     checks = 0
     while frontier:
@@ -51,7 +51,7 @@ def bfs_core(nb, robots0, boxes0, storage_mask, deadline):
         if checks % 1000 == 0 and time.perf_counter() > deadline:
             return None, came_from
 
-        robots, boxes = frontier.popleft()
+        f, _, (robots, boxes) = heapq.heappop(frontier)
         if boxes & ~storage_mask == 0:          # mọi thùng nằm trong storage_mask
             return (robots, boxes), came_from
 
@@ -59,7 +59,8 @@ def bfs_core(nb, robots0, boxes0, storage_mask, deadline):
             key = (nr, nbx)
             if key not in came_from:
                 came_from[key] = ((robots, boxes), action)
-                frontier.append(key)
+                counter += 1
+                heapq.heappush(frontier, (f+1, counter, key))
     return None, came_from
 def heuristic(state):
     total = 0  # tổng h(n) của cả state
@@ -111,6 +112,9 @@ def solve(initial_state, timebound=120):
     # replay qua successors() thật để có SokobanState hợp lệ
     current = initial_state
     for r, d in actions:
-        wanted = "{} {}".format(r, DIR_NAMES[d])
-        current = next(s for s in current.successors() if s.action == wanted)
+        x, y = current.robots[r]
+        dx, dy = DELTAS[d]
+        target = (x + dx, y + dy)
+        current = next(s for s in current.successors() if s.robots[r] == target)
     return current
+
