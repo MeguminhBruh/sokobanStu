@@ -86,6 +86,53 @@ def heuristic_mask(boxes, storage_mask, w):  #thêm heuristic_mask để phù h�
 
     return total
 
+def is_deadlock(nb, boxes, storage_mask):
+    """
+    Deadlock góc cơ bản:
+    nếu một box không nằm trên storage và bị chặn ở 2 hướng vuông góc thì state đó không thể giải tiếp.
+    """
+
+    temp_boxes = boxes
+
+    while temp_boxes:
+        bit = temp_boxes & -temp_boxes
+        box_pos = bit.bit_length() - 1
+
+        # box đang ở storage thì không coi là deadlock
+        if bit & storage_mask:
+            temp_boxes ^= bit
+            continue
+
+        # 4 hướng quanh box
+        up = nb[box_pos][0]
+        right = nb[box_pos][1]
+        down = nb[box_pos][2]
+        left = nb[box_pos][3]
+
+        # nb = -1 nghĩa là bị tường hoặc ra ngoài biên
+        up_blocked = up == -1
+        right_blocked = right == -1
+        down_blocked = down == -1
+        left_blocked = left == -1
+
+        # box mắc ở một trong 4 góc
+        if up_blocked and left_blocked:
+            return True
+
+        if up_blocked and right_blocked:
+            return True
+
+        if down_blocked and left_blocked:
+            return True
+
+        if down_blocked and right_blocked:
+            return True
+
+        # chuyển sang box tiếp theo
+        temp_boxes ^= bit
+
+    return False
+
 def bfs_core(nb, robots0, boxes0, storage_mask, deadline):
     """Trả về (goal_key, came_from) nếu tìm thấy, hoặc (None, came_from) nếu hết giờ/không có lời giải."""
     start = (robots0, boxes0)
@@ -103,6 +150,10 @@ def bfs_core(nb, robots0, boxes0, storage_mask, deadline):
             return (robots, boxes), came_from
 
         for nr, nbx, action in gen_successors(nb, robots, boxes):
+             # bỏ state nếu có box bị kẹt ở góc
+            if is_deadlock(nb, nbx, storage_mask):
+                continue
+
             key = (nr, nbx)
             if key not in came_from:
                 came_from[key] = ((robots, boxes), action)
