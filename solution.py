@@ -91,7 +91,6 @@ def is_deadlock(nb, boxes, storage_mask):
     Deadlock góc cơ bản:
     nếu một box không nằm trên storage và bị chặn ở 2 hướng vuông góc thì state đó không thể giải tiếp.
     """
-
     temp_boxes = boxes
 
     while temp_boxes:
@@ -133,19 +132,25 @@ def is_deadlock(nb, boxes, storage_mask):
 
     return False
 
-def bfs_core(nb, robots0, boxes0, storage_mask, deadline):
+def bfs_core(nb, robots0, boxes0, storage_mask, w, deadline):
     """Trả về (goal_key, came_from) nếu tìm thấy, hoặc (None, came_from) nếu hết giờ/không có lời giải."""
     start = (robots0, boxes0)
     counter = 0
-    frontier =[(0,counter, start)]
-    came_from = {start: None}      # key -> (parent_key, action) hoặc None cho state đầu
+    h0 = heuristic_mask(boxes0, storage_mask, w) #h của state đầu
+    frontier =[(h0, counter, 0, start)] # (f, tie, g, key)
+    came_from = {start: None}   # key -> (parent_key, action) hoặc None cho state đầu
+    best_g = {start: 0}
     checks = 0
     while frontier:
         checks += 1
         if checks % 1000 == 0 and time.perf_counter() > deadline:
             return None, came_from
 
-        f, _, (robots, boxes) = heapq.heappop(frontier)
+        f, _, g, (robots, boxes) = heapq.heappop(frontier)   # lấy state có f nhỏ nhất
+
+        if g > best_g[(robots, boxes)]:
+            continue
+
         if boxes & ~storage_mask == 0:          # mọi thùng nằm trong storage_mask
             return (robots, boxes), came_from
 
@@ -155,10 +160,13 @@ def bfs_core(nb, robots0, boxes0, storage_mask, deadline):
                 continue
 
             key = (nr, nbx)
-            if key not in came_from:
-                came_from[key] = ((robots, boxes), action)
-                counter += 1
-                heapq.heappush(frontier, (f+1, counter, key))
+            ng = g + 1
+            if key not in best_g or ng < best_g[key]:       # chưa gặp, hoặc đường mới tốt hơn
+                 nh = heuristic_mask(nbx, storage_mask, w)   # h mới
+                 best_g[key] = ng
+                 came_from[key] = ((robots, boxes), action)
+                 counter += 1
+                 heapq.heappush(frontier, (ng + nh, counter, ng, key))   # f = g + h
     return None, came_from
 def heuristic(state):
     total = 0  # tổng h(n) của cả state
@@ -167,13 +175,15 @@ def heuristic(state):
         min_distance = float("inf")  # khoảng cách nhỏ nhất từ box này tới 1 storage
 
         for storage in state.storage:  # thử tất cả ô đích
-            distance = abs(box[0] - storage[0]) + abs(box[1] - storage[1]) # tính khoảng cách Manhattan giữa box và storage
+            distance = abs(box[0] - storage[0]) + abs(
+                box[1] - storage[1])  # tính khoảng cách Manhattan giữa box và storage
 
-            min_distance = min(min_distance, distance) # giữ lại storage gần box này nhất
+            min_distance = min(min_distance, distance)  # giữ lại storage gần box này nhất
 
-        total += min_distance # cộng khoảng cách gần nhất của box này vào tổng h(n)
+        total += min_distance  # cộng khoảng cách gần nhất của box này vào tổng h(n)
 
     return total  # trả về heuristic h(n)
+
 
 def solve(initial_state, timebound=120):
     if timebound is None or timebound <= 0:
@@ -190,11 +200,11 @@ def solve(initial_state, timebound=120):
     for (x, y) in initial_state.storage:
         storage_mask |= 1 << (y * w + x)
 
-    if boxes0 & ~storage_mask == 0:             # đã là goal ngay từ đầu
+    if boxes0 & ~storage_mask == 0:  # đã là goal ngay từ đầu
         return initial_state
 
     deadline = time.perf_counter() + timebound
-    goal_key, came_from = bfs_core(nb, robots0, boxes0, storage_mask, deadline)
+    goal_key, came_from = bfs_core(nb, robots0, boxes0, storage_mask, w, deadline)
     if goal_key is None:
         return False
 
@@ -215,4 +225,3 @@ def solve(initial_state, timebound=120):
         target = (x + dx, y + dy)
         current = next(s for s in current.successors() if s.robots[r] == target)
     return current
-
