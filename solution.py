@@ -38,21 +38,11 @@ def gen_successors(nb, robots, boxes): #sinh ra tất cả các trạng thái (r
             out.append((new_robots, nbx, (r, d)))
     return out
 
-def heuristic_mask(boxes, storage_mask, w):  #thêm heuristic_mask để phù hợp với code search hiện tại
+def heuristic_mask(boxes, storages, w):  
+    # storages đã được tính 1 lần trong solve(),
+    # không cần tạo lại mỗi lần heuristic được gọi
+
     total = 0  # tổng h(n)
-
-    # lấy danh sách vị trí các storage từ storage_mask
-    storages = []
-
-    temp_storage = storage_mask
-
-    while temp_storage:
-        bit = temp_storage & -temp_storage
-        pos = bit.bit_length() - 1
-
-        storages.append(pos)
-
-        temp_storage ^= bit
 
     # duyệt từng box
     temp_boxes = boxes
@@ -86,57 +76,51 @@ def heuristic_mask(boxes, storage_mask, w):  #thêm heuristic_mask để phù h�
 
     return total
 
-def is_deadlock(nb, boxes, storage_mask):
+def is_corner_deadlock(nb, box_pos, storage_mask):
     """
-    Deadlock góc cơ bản:
-    nếu một box không nằm trên storage và bị chặn ở 2 hướng vuông góc thì state đó không thể giải tiếp.
+    Chỉ kiểm tra box vừa được đẩy.
+    Nếu box không nằm trên storage nhưng bị kẹt ở góc
+    thì đây là deadlock.
     """
-    temp_boxes = boxes
 
-    while temp_boxes:
-        bit = temp_boxes & -temp_boxes
-        box_pos = bit.bit_length() - 1
+    bit = 1 << box_pos
 
-        # box đang ở storage thì không coi là deadlock
-        if bit & storage_mask:
-            temp_boxes ^= bit
-            continue
+    # box đã nằm trên storage thì không coi là deadlock
+    if bit & storage_mask:
+        return False
 
-        # 4 hướng quanh box
-        up = nb[box_pos][0]
-        right = nb[box_pos][1]
-        down = nb[box_pos][2]
-        left = nb[box_pos][3]
+    # 4 ô xung quanh box
+    up = nb[box_pos][0]
+    right = nb[box_pos][1]
+    down = nb[box_pos][2]
+    left = nb[box_pos][3]
 
-        # nb = -1 nghĩa là bị tường hoặc ra ngoài biên
-        up_blocked = up == -1
-        right_blocked = right == -1
-        down_blocked = down == -1
-        left_blocked = left == -1
+    # -1 nghĩa là tường hoặc ra ngoài biên
+    up_blocked = up == -1
+    right_blocked = right == -1
+    down_blocked = down == -1
+    left_blocked = left == -1
 
-        # box mắc ở một trong 4 góc
-        if up_blocked and left_blocked:
-            return True
+    # 4 trường hợp box bị mắc góc
+    if up_blocked and left_blocked:
+        return True
 
-        if up_blocked and right_blocked:
-            return True
+    if up_blocked and right_blocked:
+        return True
 
-        if down_blocked and left_blocked:
-            return True
+    if down_blocked and left_blocked:
+        return True
 
-        if down_blocked and right_blocked:
-            return True
-
-        # chuyển sang box tiếp theo
-        temp_boxes ^= bit
+    if down_blocked and right_blocked:
+        return True
 
     return False
 
-def bfs_core(nb, robots0, boxes0, storage_mask, w, deadline):
+def astar_core(nb, robots0, boxes0, storage_mask, storages, w, deadline):
     """Trả về (goal_key, came_from) nếu tìm thấy, hoặc (None, came_from) nếu hết giờ/không có lời giải."""
     start = (robots0, boxes0)
     counter = 0
-    h0 = heuristic_mask(boxes0, storage_mask, w) #h của state đầu
+    h0 = heuristic_mask(boxes0, storages, w) #h của state đầu
     frontier =[(h0, counter, 0, start)] # (f, tie, g, key)
     came_from = {start: None}   # key -> (parent_key, action) hoặc None cho state đầu
     best_g = {start: 0}
@@ -155,14 +139,23 @@ def bfs_core(nb, robots0, boxes0, storage_mask, w, deadline):
             return (robots, boxes), came_from
 
         for nr, nbx, action in gen_successors(nb, robots, boxes):
-             # bỏ state nếu có box bị kẹt ở góc
-            if is_deadlock(nb, nbx, storage_mask):
-                continue
+            # Nếu boxes thay đổi thì vừa có một box bị đẩy
+            if nbx != boxes:
+
+                # bit mới xuất hiện chính là vị trí mới của box vừa bị đẩy
+                moved_box_bits = nbx & ~boxes
+
+                if moved_box_bits:
+                    moved_box_pos = moved_box_bits.bit_length() - 1
+
+                    # nếu box vừa đẩy bị mắc góc thì bỏ state này
+                    if is_corner_deadlock(nb, moved_box_pos, storage_mask):
+                        continue
 
             key = (nr, nbx)
             ng = g + 1
             if key not in best_g or ng < best_g[key]:       # chưa gặp, hoặc đường mới tốt hơn
-                 nh = heuristic_mask(nbx, storage_mask, w)   # h mới
+                 nh = heuristic_mask(nbx, storages, w)   # h mới
                  best_g[key] = ng
                  came_from[key] = ((robots, boxes), action)
                  counter += 1
@@ -186,9 +179,12 @@ def heuristic(state):
 
 
 def solve(initial_state, timebound=120):
+    
+    # lưu thời điểm bắt đầu toàn bộ solve()
     if timebound is None or timebound <= 0:
         return False
-
+    solve_start = time.perf_counter()
+    # ghi lại thời điểm bắt đầu toàn bộ solve()
     w, h = initial_state.width, initial_state.height
     nb = build_neighbors(initial_state)
 
@@ -197,14 +193,26 @@ def solve(initial_state, timebound=120):
     for (x, y) in initial_state.boxes:
         boxes0 |= 1 << (y * w + x)
     storage_mask = 0
-    for (x, y) in initial_state.storage:
-        storage_mask |= 1 << (y * w + x)
+    storages = []  # lưu vị trí các ô đích để heuristic dùng lại
 
+    for (x, y) in initial_state.storage:
+        pos = y * w + x
+
+        storage_mask |= 1 << pos
+        storages.append(pos)
+
+    storages = tuple(storages)
+    # tính một lần duy nhất, không thay đổi trong quá trình search
     if boxes0 & ~storage_mask == 0:  # đã là goal ngay từ đầu
         return initial_state
 
-    deadline = time.perf_counter() + timebound
-    goal_key, came_from = bfs_core(nb, robots0, boxes0, storage_mask, w, deadline)
+    reserve = min(1.0, timebound * 0.10)
+    # chừa tối đa 1 giây cho bước replay
+
+    search_deadline = solve_start + timebound - reserve
+    # phần search dùng gần như toàn bộ timebound
+    # nhưng vẫn chừa lại một ít thời gian để dựng lại đường đi
+    goal_key, came_from = astar_core(nb, robots0, boxes0, storage_mask, storages, w, search_deadline)
     if goal_key is None:
         return False
 
@@ -220,8 +228,16 @@ def solve(initial_state, timebound=120):
     # replay qua successors() thật để có SokobanState hợp lệ
     current = initial_state
     for r, d in actions:
+
+        # đảm bảo toàn bộ solve() không vượt timebound
+        if time.perf_counter() - solve_start >= timebound:
+            return False
+    
         x, y = current.robots[r]
         dx, dy = DELTAS[d]
         target = (x + dx, y + dy)
-        current = next(s for s in current.successors() if s.robots[r] == target)
+        current = next(
+            s for s in current.successors() 
+            if s.robots[r] == target
+        )
     return current
