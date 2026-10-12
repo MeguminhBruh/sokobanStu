@@ -2,6 +2,7 @@
 
 import time
 import heapq
+from collections import deque
 DELTAS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
 
 def build_neighbors(state): #ính sẵn, cho mỗi ô trên bàn cờ, 4 ô liền kề (lên/phải/xuống/trái) nếu đi được hoặc -1 nếu bị chặn (tường/ra ngoài biên), để lúc search không phải tính lại tọa độ hay tra frozenset mỗi lần.
@@ -37,6 +38,46 @@ def gen_successors(nb, robots, boxes): #sinh ra tất cả các trạng thái (r
             new_robots = robots[:r] + (np_,) + robots[r + 1:]
             out.append((new_robots, nbx, (r, d)))
     return out
+
+def gen_macro_successors(nb, robots, boxes):
+    """Mỗi successor = 1 robot đi bộ tới sát một thùng rồi đẩy nó 1 ô.
+    Trả về (robots mới, boxes mới, (r, dãy hướng), chi phí = số bước đi + 1)."""
+    out = []
+    for r in range(len(robots)):
+        start = robots[r]
+        others = set(robots[:r] + robots[r + 1:])   # robot khác là vật cản
+        parent = {start: None}                      # ô -> (ô trước, hướng đã đi)
+        dist = {start: 0}
+        queue = deque([start])
+        while queue:
+            c = queue.popleft()
+            for d in range(4):
+                nxt = nb[c][d]
+                if nxt < 0 or nxt in others:
+                    continue
+                if (boxes >> nxt) & 1:                       # ô kế là thùng -> thử đẩy
+                    t = nb[nxt][d]
+                    if t < 0 or (boxes >> t) & 1 or t in others:
+                        continue
+                    path = [d]                                # đường đi bộ start -> c, rồi đẩy
+                    cur = c
+                    while parent[cur] is not None:
+                        cur, pd = parent[cur]
+                        path.append(pd)
+                    path.reverse()
+                    new_robots = robots[:r] + (nxt,) + robots[r + 1:]
+                    new_boxes = boxes ^ (1 << nxt) ^ (1 << t)
+                    out.append((new_robots, new_boxes, (r, tuple(path)), dist[c] + 1))
+                    continue
+                if nxt not in parent:                         # ô trống -> đi tiếp (BFS)
+                    parent[nxt] = (c, d)
+                    dist[nxt] = dist[c] + 1
+                    queue.append(nxt)
+    return out
+
+def gen_single(nb, robots, boxes):
+    """Bọc gen_successors cũ về cùng định dạng với macro (mỗi bước chi phí 1)."""
+    return [(nr, nbx, (r, (d,)), 1) for nr, nbx, (r, d) in gen_successors(nb, robots, boxes)]
 
 def heuristic_mask(boxes, storages, w):  
     # storages đã được tính 1 lần trong solve(),
@@ -116,7 +157,7 @@ def is_corner_deadlock(nb, box_pos, storage_mask):
 
     return False
 
-def astar_core(nb, robots0, boxes0, storage_mask, storages, w, deadline):
+def astar_core(nb, robots0, boxes0, storage_mask, storages, w, deadline,gen):
     """Trả về (goal_key, came_from) nếu tìm thấy, hoặc (None, came_from) nếu hết giờ/không có lời giải."""
     start = (robots0, boxes0)
     counter = 0
@@ -138,7 +179,7 @@ def astar_core(nb, robots0, boxes0, storage_mask, storages, w, deadline):
         if boxes & ~storage_mask == 0:          # mọi thùng nằm trong storage_mask
             return (robots, boxes), came_from
 
-        for nr, nbx, action in gen_successors(nb, robots, boxes):
+        for nr, nbx, action, cost in gen(nb, robots, boxes):
             # Nếu boxes thay đổi thì vừa có một box bị đẩy
             if nbx != boxes:
 
@@ -153,7 +194,7 @@ def astar_core(nb, robots0, boxes0, storage_mask, storages, w, deadline):
                         continue
 
             key = (nr, nbx)
-            ng = g + 1
+            ng = g + cost
             if key not in best_g or ng < best_g[key]:       # chưa gặp, hoặc đường mới tốt hơn
                  nh = heuristic_mask(nbx, storages, w)   # h mới
                  best_g[key] = ng
@@ -201,18 +242,20 @@ def solve(initial_state, timebound=120):
         storage_mask |= 1 << pos
         storages.append(pos)
 
-    storages = tuple(storages)
-    # tính một lần duy nhất, không thay đổi trong quá trình search
     if boxes0 & ~storage_mask == 0:  # đã là goal ngay từ đầu
         return initial_state
 
-    reserve = min(1.0, timebound * 0.10)
-    # chừa tối đa 1 giây cho bước replay
+    deadline = time.perf_counter() + timebound
+    macro_deadline = time.perf_counter() + 0.7 * timebound      # dành 70% thời gian cho macro
 
-    search_deadline = solve_start + timebound - reserve
-    # phần search dùng gần như toàn bộ timebound
-    # nhưng vẫn chừa lại một ít thời gian để dựng lại đường đi
-    goal_key, came_from = astar_core(nb, robots0, boxes0, storage_mask, storages, w, search_deadline)
+    # thử macro move trước
+    goal_key, came_from = astar_core(nb, robots0, boxes0, storage_mask, storages, w,
+                                   macro_deadline, gen_macro_successors)
+
+    # macro không ra lời giải -> thử lại bằng đi từng bước với thời gian còn lại
+    if goal_key is None and time.perf_counter() < deadline:
+        goal_key, came_from = astar_core(nb, robots0, boxes0, storage_mask, storages, w,
+                                       deadline, gen_single)
     if goal_key is None:
         return False
 
@@ -226,18 +269,12 @@ def solve(initial_state, timebound=120):
     actions.reverse()
 
     # replay qua successors() thật để có SokobanState hợp lệ
+    # mỗi action là (robot r, dãy hướng dirs): đi bộ rồi đẩy
     current = initial_state
-    for r, d in actions:
-
-        # đảm bảo toàn bộ solve() không vượt timebound
-        if time.perf_counter() - solve_start >= timebound:
-            return False
-    
-        x, y = current.robots[r]
-        dx, dy = DELTAS[d]
-        target = (x + dx, y + dy)
-        current = next(
-            s for s in current.successors() 
-            if s.robots[r] == target
-        )
+    for r, dirs in actions:
+        for d in dirs:
+            x, y = current.robots[r]
+            dx, dy = DELTAS[d]
+            target = (x + dx, y + dy)
+            current = next(s for s in current.successors() if s.robots[r] == target)
     return current
