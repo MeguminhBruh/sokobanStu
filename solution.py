@@ -1,5 +1,8 @@
 """Student entry point. See README.md for the API and scoring rules."""
 
+"""Student entry point. See README.md for the API and scoring rules."""
+
+
 import time
 import heapq
 from collections import deque
@@ -157,94 +160,81 @@ def is_corner_deadlock(nb, box_pos, storage_mask):
 
     return False
 
-def astar_core(nb, robots0, boxes0, storage_mask, storages, w, deadline,gen):
-    """Trả về (goal_key, came_from) nếu tìm thấy, hoặc (None, came_from) nếu hết giờ/không có lời giải."""
+def is_frozen(nb, c, boxes, visiting):
+    """True nếu thùng ở ô c không bao giờ di chuyển được nữa (khóa cả 2 trục)."""
+    visiting = visiting | {c}
+    for a_dir, b_dir in ((3, 1), (0, 2)):            # trục ngang (trái, phải), trục dọc (lên, xuống)
+        a, b = nb[c][a_dir], nb[c][b_dir]
+        if a < 0 or b < 0:
+            continue                                  # có tường ở 1 bên -> trục này bị khóa
+        blocked = False
+        for n in (a, b):
+            # bên cạnh là thùng cũng đông cứng -> trục này bị khóa
+            if (boxes >> n) & 1 and (n in visiting or is_frozen(nb, n, boxes, visiting)):
+                blocked = True
+        if blocked:
+            continue
+        return False                                  # trục này còn tự do -> chưa đông cứng
+    return True
+ 
+ 
+def freeze_deadlock(nb, boxes, c, storage_mask):
+    """Sau khi thùng vừa tới ô c: nó (hoặc thùng sát nó) có thành thùng đông cứng
+    nằm ngoài ô đích không? Nếu có -> state vô nghiệm."""
+    cells = [c] + [n for n in nb[c] if n >= 0 and (boxes >> n) & 1]
+    for cell in cells:
+        if not (storage_mask >> cell) & 1 and is_frozen(nb, cell, boxes, frozenset()):
+            return True
+    return False
+
+def astar_core(nb, robots0, boxes0, storage_mask, storages, w, deadline, gen,
+               weight=1.0, bound=float("inf"), max_nodes=2_000_000):
+    """Weighted A*: f = g + weight * h.
+    Chỉ nhận lời giải có chi phí < bound.
+    Trả về (status, goal_key, came_from, cost) với status là
+    'found' | 'exhausted' | 'timeout' | 'limit'."""
     start = (robots0, boxes0)
     counter = 0
-    h0 = heuristic_mask(boxes0, storages, w) #h của state đầu
-    frontier =[(h0, counter, 0, start)] # (f, tie, g, key)
-    came_from = {start: None}   # key -> (parent_key, action) hoặc None cho state đầu
+    h0 = heuristic_mask(boxes0, storages, w)
+    frontier = [(weight * h0, counter, 0, start)]      # (f, tie, g, key)
+    came_from = {start: None}
     best_g = {start: 0}
     checks = 0
     while frontier:
         checks += 1
-        if checks % 1000 == 0 and time.perf_counter() > deadline:
-            return None, came_from
-
-        f, _, g, (robots, boxes) = heapq.heappop(frontier)   # lấy state có f nhỏ nhất
-
+        if checks & 63 == 0:                           # macro mỗi lần pop khá đắt -> check thường xuyên
+            if time.perf_counter() > deadline:
+                return "timeout", None, came_from, None
+            if len(best_g) > max_nodes:
+                return "limit", None, came_from, None
+ 
+        f, _, g, (robots, boxes) = heapq.heappop(frontier)
         if g > best_g[(robots, boxes)]:
-            continue
-
-        if boxes & ~storage_mask == 0:          # mọi thùng nằm trong storage_mask
-            return (robots, boxes), came_from
-
+            continue                                   # bản ghi cũ, đã có đường tốt hơn
+ 
+        if boxes & ~storage_mask == 0:
+            return "found", (robots, boxes), came_from, g
+ 
         for nr, nbx, action, cost in gen(nb, robots, boxes):
-            # Nếu boxes thay đổi thì vừa có một box bị đẩy
             if nbx != boxes:
-
-                # bit mới xuất hiện chính là vị trí mới của box vừa bị đẩy
-                moved_box_bits = nbx & ~boxes
-
-                if moved_box_bits:
-                    moved_box_pos = moved_box_bits.bit_length() - 1
-
-                    # nếu box vừa đẩy bị mắc góc thì bỏ state này
-                    if is_corner_deadlock(nb, moved_box_pos, storage_mask):
-                        continue
-
-            key = (nr, nbx)
+                moved = nbx & ~boxes
+                if moved and freeze_deadlock(nb, nbx, moved.bit_length() - 1, storage_mask):
+                    continue
+ 
             ng = g + cost
-            if key not in best_g or ng < best_g[key]:       # chưa gặp, hoặc đường mới tốt hơn
-                 nh = heuristic_mask(nbx, storages, w)   # h mới
-                 best_g[key] = ng
-                 came_from[key] = ((robots, boxes), action)
-                 counter += 1
-                 heapq.heappush(frontier, (ng + nh, counter, ng, key))   # f = g + h
-    return None, came_from
+            nh = heuristic_mask(nbx, storages, w)
+            if ng + nh >= bound:                       # không thể tốt hơn lời giải đã có
+                continue
+            key = (nr, nbx)
+            if key not in best_g or ng < best_g[key]:
+                best_g[key] = ng
+                came_from[key] = ((robots, boxes), action)
+                counter += 1
+                heapq.heappush(frontier, (ng + weight * nh, counter, ng, key))
+    return "exhausted", None, came_from, None
+ 
 
-
-def solve(initial_state, timebound=120):
-    
-    # lưu thời điểm bắt đầu toàn bộ solve()
-    if timebound is None or timebound <= 0:
-        return False
-    solve_start = time.perf_counter()
-    # ghi lại thời điểm bắt đầu toàn bộ solve()
-    w, h = initial_state.width, initial_state.height
-    nb = build_neighbors(initial_state)
-
-    robots0 = tuple(y * w + x for (x, y) in initial_state.robots)
-    boxes0 = 0
-    for (x, y) in initial_state.boxes:
-        boxes0 |= 1 << (y * w + x)
-    storage_mask = 0
-    storages = []  # lưu vị trí các ô đích để heuristic dùng lại
-
-    for (x, y) in initial_state.storage:
-        pos = y * w + x
-
-        storage_mask |= 1 << pos
-        storages.append(pos)
-
-    if boxes0 & ~storage_mask == 0:  # đã là goal ngay từ đầu
-        return initial_state
-
-    deadline = time.perf_counter() + timebound
-    macro_deadline = time.perf_counter() + 0.7 * timebound      # dành 70% thời gian cho macro
-
-    # thử macro move trước
-    goal_key, came_from = astar_core(nb, robots0, boxes0, storage_mask, storages, w,
-                                   macro_deadline, gen_macro_successors)
-
-    # macro không ra lời giải -> thử lại bằng đi từng bước với thời gian còn lại
-    if goal_key is None and time.perf_counter() < deadline:
-        goal_key, came_from = astar_core(nb, robots0, boxes0, storage_mask, storages, w,
-                                       deadline, gen_single)
-    if goal_key is None:
-        return False
-
-    # dựng ngược chuỗi action từ goal_key về start
+def rebuild_actions(goal_key, came_from):
     actions = []
     key = goal_key
     while came_from[key] is not None:
@@ -252,9 +242,11 @@ def solve(initial_state, timebound=120):
         actions.append(action)
         key = parent_key
     actions.reverse()
-
-    # replay qua successors() thật để có SokobanState hợp lệ
-    # mỗi action là (robot r, dãy hướng dirs): đi bộ rồi đẩy
+    return actions
+ 
+ 
+def replay(initial_state, actions):
+    """Dựng SokobanState thật từ danh sách (robot, dãy hướng)."""
     current = initial_state
     for r, dirs in actions:
         for d in dirs:
@@ -263,3 +255,61 @@ def solve(initial_state, timebound=120):
             target = (x + dx, y + dy)
             current = next(s for s in current.successors() if s.robots[r] == target)
     return current
+
+
+TIME_FRACTION = 0.8          # chỉ dùng tối đa 80% timebound, chừa thời gian cho replay
+WEIGHTS = [3, 2, 1.4, 1]     # giảm dần về 1 (A* chuẩn)
+ 
+ 
+def solve(initial_state, timebound=120):
+    if timebound is None or timebound <= 0:
+        return False
+    t0 = time.perf_counter()
+    deadline = t0 + timebound * TIME_FRACTION
+ 
+    w = initial_state.width
+    nb = build_neighbors(initial_state)
+    robots0 = tuple(y * w + x for (x, y) in initial_state.robots)
+    boxes0 = 0
+    for (x, y) in initial_state.boxes:
+        boxes0 |= 1 << (y * w + x)
+    storage_mask = 0
+    storages = []
+    for (x, y) in initial_state.storage:
+        pos = y * w + x
+        storage_mask |= 1 << pos
+        storages.append(pos)
+ 
+    if boxes0 & ~storage_mask == 0:
+        return initial_state
+ 
+    best_cost = float("inf")
+    best_actions = None
+ 
+    # Pha 1: macro move, trọng số giảm dần (anytime)
+    for weight in WEIGHTS:
+        if time.perf_counter() > deadline:
+            break
+        status, goal_key, came_from, cost = astar_core(
+            nb, robots0, boxes0, storage_mask, storages, w, deadline,
+            gen_macro_successors, weight, best_cost)
+        if status == "found":
+            best_cost = cost
+            best_actions = rebuild_actions(goal_key, came_from)
+        else:
+            break            # exhausted (đã tối ưu trong mô hình macro) / hết giờ / hết bộ nhớ
+ 
+    # Pha 2: đi từng bước, A* chuẩn, dùng lời giải macro làm bound.
+    # Chỉ khi còn thời gian: có thể tìm ra lời giải rẻ hơn (robot tránh đường)
+    # hoặc tìm lời giải khi macro không có.
+    if time.perf_counter() < deadline:
+        status, goal_key, came_from, cost = astar_core(
+            nb, robots0, boxes0, storage_mask, storages, w, deadline,
+            gen_single, 1.0, best_cost)
+        if status == "found":
+            best_cost = cost
+            best_actions = rebuild_actions(goal_key, came_from)
+ 
+    if best_actions is None:
+        return False
+    return replay(initial_state, best_actions)
